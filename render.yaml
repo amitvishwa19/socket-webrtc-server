@@ -3,7 +3,7 @@ services:
     name: devlomatix-socket-webrtc
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && npx prisma generate
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -13,3 +13,7 @@ services:
         value: 10000
       - key: CORS_ORIGIN
         value: "*"
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false

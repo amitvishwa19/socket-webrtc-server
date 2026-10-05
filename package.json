@@ -1,12 +1,15 @@
 {
   "name": "devlomatix-socket-webrtc-server",
   "version": "1.0.0",
-  "description": "High-performance Socket.io and WebRTC Signaling server for real-time Chat, Voice/Video Calling, and Screen Sharing (Render deployable)",
+  "description": "High-performance Socket.io and WebRTC Signaling server with Prisma DB integration for real-time Chat, Voice/Video Calling, and Screen Sharing (Render deployable)",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "postinstall": "prisma generate",
+    "prisma:generate": "prisma generate",
+    "prisma:studio": "prisma studio"
   },
   "keywords": [
     "socket.io",
@@ -17,14 +20,22 @@
     "video-call",
     "voice-call",
     "screen-sharing",
+    "prisma",
+    "postgresql",
     "render"
   ],
   "author": "Devlomatix Solutions",
   "license": "MIT",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.5.0",
+    "@prisma/client": "^7.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "pg": "^8.13.1",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "prisma": "^7.8.0"
   }
 }

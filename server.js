@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { setupPresenceHandler } from './src/handlers/presenceHandler.js';
 import { setupChatHandler } from './src/handlers/chatHandler.js';
 import { setupCallHandler } from './src/handlers/callHandler.js';
+import { createCronRouter } from './src/routes/cronRoutes.js';
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Socket.io Setup with optimized ping/transports for Render & WebSocket stability
 const io = new Server(httpServer, {
@@ -70,6 +72,14 @@ app.get('/metrics', (req, res) => {
 });
 
 // ==========================================
+// ⏰ INCOMING CRON ROUTER & TABLE LOGGER
+// ==========================================
+// Mounts on both /cron and /api/cron for flexible scheduler support (Render, Vercel, Cron-Job.org)
+const cronRouter = createCronRouter(io);
+app.use('/cron', cronRouter);
+app.use('/api/cron', cronRouter);
+
+// ==========================================
 // 🔌 SOCKET.IO CONNECTION ROUTER
 // ==========================================
 
@@ -97,6 +107,9 @@ httpServer.listen(PORT, () => {
   📡 Port: ${PORT}
   🌍 Environment: ${NODE_ENV}
   🩺 Health Endpoint: http://localhost:${PORT}/health
+  ⏰ Cron Trigger:    http://localhost:${PORT}/cron
+  📊 Cron History:    http://localhost:${PORT}/cron/history
+  📈 Cron Stats:      http://localhost:${PORT}/cron/stats
   ======================================================
   `);
 });
