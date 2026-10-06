@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
+    "dev": "node --watch server.js --port 5002",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio"

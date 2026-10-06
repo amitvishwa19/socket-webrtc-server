@@ -3,20 +3,81 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { exec } from 'child_process';
 
 import { setupPresenceHandler } from './src/handlers/presenceHandler.js';
 import { setupChatHandler } from './src/handlers/chatHandler.js';
 import { setupCallHandler } from './src/handlers/callHandler.js';
 import { createCronRouter } from './src/routes/cronRoutes.js';
+import { logCronRequest } from './src/lib/cronLogger.js';
 
 dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
 
-const PORT = process.env.PORT || 5000;
+const portArgIndex = process.argv.indexOf('--port');
+const PORT = Number(
+  (portArgIndex !== -1 ? process.argv[portArgIndex + 1] : null) || process.env.PORT || 5000
+);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+
+// ==========================================
+// 📥 INCOMING REQUEST LOGGER (console + CronLog table)
+// ==========================================
+const redactUrl = (url) =>
+  String(url).replace(/([?&](?:secret|token)=)[^&]*/gi, '$1***');
+
+const redactParams = (params) => {
+  if (!params) return params;
+  const out = { ...params };
+  for (const key of ['secret', 'token']) {
+    if (key in out) out[key] = '***';
+  }
+  return out;
+};
+
+const resolveJobName = (req) => {
+  if (req.query?.job) return req.query.job;
+  if (req.query?.name) return req.query.name;
+  const cronSegment = req.path.match(/^\/(?:api\/)?cron(?:\/(.+))?$/);
+  if (cronSegment) return cronSegment[1] || 'Cron Heartbeat';
+  return 'Incoming Request';
+};
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  const path = redactUrl(req.originalUrl);
+  const durationMs = () => Date.now() - startedAt;
+
+  const persist = () => {
+    logCronRequest(req, {
+      jobName: resolveJobName(req),
+      queryParams: redactParams(req.query),
+      payload: redactParams(req.body),
+      status: res.statusCode >= 400 ? 'FAILED' : 'SUCCESS',
+      statusCode: res.statusCode,
+      durationMs: durationMs()
+    }).catch((err) => {
+      console.error('[REQUEST_LOG_ERROR]', err);
+    });
+  };
+
+  res.on('finish', () => {
+    console.log(`[REQUEST] ${req.method} ${path} ${res.statusCode} ${durationMs()}ms`);
+    persist();
+  });
+
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      console.log(`[REQUEST] ${req.method} ${path} CLOSED ${durationMs()}ms`);
+      persist();
+    }
+  });
+
+  next();
+});
 
 // Standard Express Middlewares
 app.use(cors({
@@ -72,12 +133,10 @@ app.get('/metrics', (req, res) => {
 });
 
 // ==========================================
-// ⏰ INCOMING CRON ROUTER & TABLE LOGGER
+// ⏰ KEEPALIVE CRON ROUTER
 // ==========================================
-// Mounts on both /cron and /api/cron for flexible scheduler support (Render, Vercel, Cron-Job.org)
 const cronRouter = createCronRouter(io);
 app.use('/cron', cronRouter);
-app.use('/api/cron', cronRouter);
 
 // ==========================================
 // 🔌 SOCKET.IO CONNECTION ROUTER
@@ -100,6 +159,79 @@ io.on('connection', (socket) => {
 // 🚀 SERVER BOOTSTRAP & GRACEFUL SHUTDOWN
 // ==========================================
 
+function findPortOwner(port) {
+  return new Promise((resolve) => {
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? 'netstat -ano -p tcp' : `lsof -ti tcp:${port} -sTCP:LISTEN`;
+
+    exec(cmd, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+
+      if (isWindows) {
+        const match = stdout.match(
+          new RegExp(`^\\s*TCP\\s+\\S*:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`, 'im')
+        );
+        return resolve(match ? Number(match[1]) : null);
+      }
+
+      const pid = Number(stdout.split(/\r?\n/).find(Boolean)?.trim());
+      resolve(pid || null);
+    });
+  });
+}
+
+function findProcessName(pid) {
+  return new Promise((resolve) => {
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows
+      ? `tasklist /FI "PID eq ${pid}" /FO CSV /NH`
+      : `ps -p ${pid} -o comm=`;
+
+    exec(cmd, (err, stdout) => {
+      if (err || !stdout) return resolve('unknown');
+
+      if (isWindows) {
+        const match = stdout.match(/"([^"]+)"/);
+        return resolve(match ? match[1] : 'unknown');
+      }
+
+      resolve(stdout.split(/\r?\n/).find(Boolean)?.trim() || 'unknown');
+    });
+  });
+}
+
+async function reportPortConflict(port) {
+  const pid = await findPortOwner(port);
+  const killHint = process.platform === 'win32'
+    ? `taskkill //PID ${pid} //F`
+    : `kill ${pid}`;
+
+  let owner = 'unknown process';
+  if (pid) {
+    const name = await findProcessName(pid);
+    owner = `${name} (PID ${pid})`;
+  }
+
+  console.error(`
+  ======================================================
+  ❌ PORT CONFLICT: Port ${port} is already in use
+  🔍 Held by: ${owner}
+  🔧 Free it with:  ${pid ? killHint : 'close the other app using this port'}
+  💡 Or run on another port:  npm run dev
+  ======================================================
+  `);
+}
+
+httpServer.on('error', async (err) => {
+  if (err.code === 'EADDRINUSE') {
+    await reportPortConflict(PORT);
+    process.exit(1);
+  }
+
+  console.error('[SERVER_ERROR]', err);
+  process.exit(1);
+});
+
 httpServer.listen(PORT, () => {
   console.log(`
   ======================================================
@@ -108,8 +240,6 @@ httpServer.listen(PORT, () => {
   🌍 Environment: ${NODE_ENV}
   🩺 Health Endpoint: http://localhost:${PORT}/health
   ⏰ Cron Trigger:    http://localhost:${PORT}/cron
-  📊 Cron History:    http://localhost:${PORT}/cron/history
-  📈 Cron Stats:      http://localhost:${PORT}/cron/stats
   ======================================================
   `);
 });

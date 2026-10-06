@@ -1,16 +1,36 @@
 import { prisma } from './prisma.js';
 
-/**
- * Utility to log incoming cron requests into the database from the socket server.
- */
+const SENSITIVE_HEADERS = ['authorization', 'cookie', 'x-api-key', 'x-auth-token'];
+
+const maskHeaders = (headers) => {
+  const out = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (SENSITIVE_HEADERS.includes(key.toLowerCase())) {
+      out[key] = typeof value === 'string' && value.length > 0
+        ? `${value.slice(0, 10)}...`
+        : '***';
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+};
+
+const stripQuery = (url) => String(url).split('?')[0];
+
 export async function logCronRequest(req, options = {}) {
   try {
-    const endpoint = req?.originalUrl || req?.url || options.endpoint || '/cron';
+    const rawUrl = req?.originalUrl || req?.url || options.endpoint || '/cron';
+    const endpoint = options.endpoint || stripQuery(rawUrl);
     const method = req?.method || options.method || 'GET';
-    const headersObj = req?.headers || {};
 
-    const ipAddress = req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress || '127.0.0.1';
+    const ipAddress = req?.headers?.['x-forwarded-for'] ||
+      req?.headers?.['x-real-ip'] ||
+      req?.socket?.remoteAddress ||
+      '127.0.0.1';
+
     const userAgent = req?.headers?.['user-agent'] || 'cron-client';
+    const headersObj = maskHeaders(req?.headers || {});
 
     let source = options.source;
     if (!source) {
@@ -20,20 +40,28 @@ export async function logCronRequest(req, options = {}) {
         source = 'VERCEL';
       } else if (userAgent.toLowerCase().includes('cron-job.org')) {
         source = 'CRON_JOB_ORG';
+      } else if (userAgent.toLowerCase().includes('github')) {
+        source = 'GITHUB_ACTIONS';
       } else {
         source = 'EXTERNAL_WEBHOOK';
       }
     }
 
+    const queryParams = options.queryParams ?? (req?.query
+      ? { ...req.query, secret: undefined, token: undefined }
+      : null);
+
+    const payload = options.payload ?? req?.body ?? null;
+
     const logRecord = await prisma.cronLog.create({
       data: {
-        jobName: options.jobName || req?.query?.job || 'Incoming Cron',
+        jobName: options.jobName || req?.query?.job || 'Incoming Request',
         source,
         endpoint,
         method,
         headers: headersObj,
-        queryParams: req?.query || options.queryParams || null,
-        payload: req?.body || options.payload || null,
+        queryParams,
+        payload,
         ipAddress: typeof ipAddress === 'string' ? ipAddress.split(',')[0].trim() : null,
         userAgent,
         status: options.status || (options.statusCode && options.statusCode >= 400 ? 'FAILED' : 'SUCCESS'),
@@ -53,3 +81,5 @@ export async function logCronRequest(req, options = {}) {
     return null;
   }
 }
+
+export default logCronRequest;
