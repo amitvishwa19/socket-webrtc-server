@@ -14,7 +14,7 @@ export function createCronRouter(io) {
       success: true,
       status: 'awake',
       jobName,
-      message: `Cron job [${jobName}] executed`,
+      message: `Cron job [${jobName}] executed-render`,
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
       uptimeSeconds: Math.floor(process.uptime()),

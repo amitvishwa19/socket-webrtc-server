@@ -41,7 +41,8 @@ const redactParams = (params) => {
 const resolveJobName = (req) => {
   if (req.query?.job) return req.query.job;
   if (req.query?.name) return req.query.name;
-  const cronSegment = req.path.match(/^\/(?:api\/)?cron(?:\/(.+))?$/);
+  const pathOnly = String(req.originalUrl || req.url || '').split('?')[0];
+  const cronSegment = pathOnly.match(/^\/(?:api\/)?cron(?:\/(.+))?$/);
   if (cronSegment) return cronSegment[1] || 'Cron Heartbeat';
   return 'Incoming Request';
 };
