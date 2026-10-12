@@ -43,8 +43,8 @@ const resolveJobName = (req) => {
   if (req.query?.name) return req.query.name;
   const pathOnly = String(req.originalUrl || req.url || '').split('?')[0];
   const cronSegment = pathOnly.match(/^\/(?:api\/)?cron(?:\/(.+))?$/);
-  if (cronSegment) return cronSegment[1] || 'Cron Heartbeat';
-  return 'Incoming Request';
+  if (cronSegment) return cronSegment[1] || 'Render webhoo incoming cron';
+  return 'Render webhoo incoming cron';
 };
 
 app.use((req, res, next) => {

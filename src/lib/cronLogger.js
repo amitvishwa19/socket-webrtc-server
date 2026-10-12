@@ -55,7 +55,7 @@ export async function logCronRequest(req, options = {}) {
 
     const logRecord = await prisma.cronLog.create({
       data: {
-        jobName: options.jobName || req?.query?.job || 'Incoming Request',
+        jobName: options.jobName || req?.query?.job || 'Render webhoo incoming cron',
         source,
         endpoint,
         method,

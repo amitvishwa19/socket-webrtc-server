@@ -5,10 +5,10 @@ export function createCronRouter(io) {
 
   const handleCron = (req, res, namedJob = null) => {
 
-    console.log(`[CRON] ${namedJob || req.query?.job || req.query?.name || 'Devlomatix Cron Heartbeat'} executed at ${new Date().toISOString()}`);
+    console.log(`[CRON] ${namedJob || req.query?.job || req.query?.name || 'Render webhoo incoming cron'} executed at ${new Date().toISOString()}`);
     const startedAt = Date.now();
     const { job, name, source, workspaceId, cronId } = req.query || {};
-    const jobName = namedJob || job || name || 'Devlomatix Cron Heartbeat';
+    const jobName = namedJob || job || name || 'Render webhoo incoming cron';
 
     res.json({
       success: true,
