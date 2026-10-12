@@ -11,7 +11,7 @@ const roomCache = new Map();
 /**
  * Persist message asynchronously to Supabase PostgreSQL crm_chat_messages
  */
-async function saveMessageToDb(msg) {
+export async function saveMessageToDb(msg) {
   try {
     await prisma.$executeRawUnsafe(
       `INSERT INTO crm_chat_messages (id, room_id, workspace_id, sender_id, sender_name, sender_avatar, recipient_id, message, attachments, delivered, read, created_at)
@@ -35,6 +35,18 @@ async function saveMessageToDb(msg) {
   } catch (err) {
     console.error('[CHAT_DB_ERROR] Failed to persist message:', err.message || err);
   }
+}
+
+/**
+ * Add message to low-latency in-memory room cache
+ */
+export function addMessageToRoomCache(roomId, msg) {
+  if (!roomCache.has(roomId)) {
+    roomCache.set(roomId, []);
+  }
+  const cache = roomCache.get(roomId);
+  cache.push(msg);
+  if (cache.length > 100) cache.shift();
 }
 
 /**

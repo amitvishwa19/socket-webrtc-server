@@ -1,31 +1,113 @@
 /**
  * WebRTC Signaling & Call Handler: 1-on-1 and Group Voice/Video Calls & Screen Sharing
+ * Persists Call Logs (completed, missed, declined, busy) directly into crm_chat_messages.
  */
+
+import { saveMessageToDb, addMessageToRoomCache } from './chatHandler.js';
 
 // Memory map: activeCallRooms (roomId -> { callerId, calleeId, callType, startedAt, participants: Set(socketId) })
 const activeCalls = new Map();
+
+/**
+ * Record a call entry message into crm_chat_messages and broadcast to the chat room
+ */
+async function recordCallLogMessage(io, { call, callStatus, duration = 0 }) {
+  if (!call || call.logRecorded) return;
+  call.logRecorded = true;
+
+  const isVideo = call.callType === 'video';
+  const callTitle = isVideo ? 'Video Call' : 'Voice Call';
+  let msgText = '';
+
+  if (callStatus === 'completed') {
+    const mins = Math.floor(duration / 60);
+    const secs = duration % 60;
+    const durStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    msgText = `${isVideo ? '📹' : '📞'} ${callTitle} • ${durStr}`;
+  } else if (callStatus === 'declined') {
+    msgText = `${isVideo ? '📹' : '📞'} Declined ${callTitle}`;
+  } else if (callStatus === 'missed') {
+    msgText = `${isVideo ? '📹' : '📞'} Missed ${callTitle}`;
+  } else if (callStatus === 'busy') {
+    msgText = `${isVideo ? '📹' : '📞'} Busy ${callTitle}`;
+  } else {
+    msgText = `${isVideo ? '📹' : '📞'} ${callTitle}`;
+  }
+
+  const messagePayload = {
+    id: `call_${call.roomId}_${Date.now()}`,
+    roomId: call.chatRoomId,
+    workspaceId: call.workspaceId || null,
+    senderId: call.callerId,
+    senderName: call.callerName || 'Sales Representative',
+    senderAvatar: call.callerAvatar || null,
+    recipientId: call.calleeId,
+    message: msgText,
+    attachments: [
+      {
+        type: 'call_log',
+        callType: call.callType || 'audio',
+        callStatus, // 'completed' | 'declined' | 'missed' | 'busy'
+        duration,
+        callerId: call.callerId,
+        callerName: call.callerName,
+        calleeId: call.calleeId,
+        calleeName: call.calleeName,
+        timestamp: new Date().toISOString()
+      }
+    ],
+    timestamp: new Date().toISOString(),
+    delivered: true,
+    read: false
+  };
+
+  try {
+    addMessageToRoomCache(call.chatRoomId, messagePayload);
+    await saveMessageToDb(messagePayload);
+
+    // Broadcast in real-time to active chat room
+    io.to(`room:${call.chatRoomId}`).emit('chat:message:receive', messagePayload);
+    // Also notify direct personal user rooms
+    if (call.callerId) io.to(`user:${call.callerId}`).emit('chat:message:receive', messagePayload);
+    if (call.calleeId) io.to(`user:${call.calleeId}`).emit('chat:message:receive', messagePayload);
+
+    console.log(`[CALL_LOG] Saved call log to crm_chat_messages (Room: ${call.chatRoomId}, Status: ${callStatus}, Duration: ${duration}s)`);
+  } catch (err) {
+    console.error('[CALL_LOG_ERROR] Failed to save call log:', err.message || err);
+  }
+}
 
 export function setupCallHandler(io, socket) {
   /**
    * 1. CALL INVITATION (Caller -> Server -> Callee)
    */
-  socket.on('call:invite', ({ calleeId, roomId, callType = 'video', callerInfo = {} }) => {
+  socket.on('call:invite', ({ calleeId, roomId, callType = 'audio', workspaceId, callerInfo = {} }) => {
     if (!calleeId) return;
 
     const callRoomId = roomId || `call_${socket.userId}_${calleeId}_${Date.now()}`;
+    const chatRoomId = [socket.userId, calleeId].sort().join('_');
+    const wsId = workspaceId || socket.workspaceId || null;
     socket.join(`call:${callRoomId}`);
 
     activeCalls.set(callRoomId, {
       roomId: callRoomId,
+      chatRoomId,
+      workspaceId: wsId,
       callerId: socket.userId,
+      callerName: callerInfo.name || socket.userName || 'Sales Representative',
+      callerAvatar: callerInfo.avatar || socket.avatar || null,
       calleeId,
+      calleeName: null,
+      calleeAvatar: null,
       callType, // 'audio' | 'video'
       status: 'ringing',
       startedAt: new Date().toISOString(),
+      connectedAt: null,
+      logRecorded: false,
       participants: new Set([socket.id])
     });
 
-    // Ring target user
+    // Ring target user personal room
     io.to(`user:${calleeId}`).emit('call:incoming', {
       roomId: callRoomId,
       callerId: socket.userId,
@@ -45,7 +127,7 @@ export function setupCallHandler(io, socket) {
   /**
    * 2. CALL RESPONSE (Callee accepts or rejects the call)
    */
-  socket.on('call:response', ({ roomId, accepted, reason = 'declined' }) => {
+  socket.on('call:response', async ({ roomId, accepted, reason = 'declined' }) => {
     if (!roomId) return;
 
     const call = activeCalls.get(roomId);
@@ -55,29 +137,48 @@ export function setupCallHandler(io, socket) {
       if (call) {
         call.status = 'connected';
         call.connectedAt = new Date().toISOString();
+        call.calleeName = socket.userName || call.calleeName;
+        call.calleeAvatar = socket.avatar || call.calleeAvatar;
         call.participants.add(socket.id);
       }
 
-      // Notify the call room that callee has joined & accepted
-      io.to(`call:${roomId}`).emit('call:accepted', {
+      const payload = {
         roomId,
         calleeId: socket.userId,
         calleeName: socket.userName,
         calleeAvatar: socket.avatar
-      });
+      };
+
+      // Notify caller specifically (to avoid duplicate events and SDP Glare on callee)
+      if (call?.callerId) {
+        io.to(`user:${call.callerId}`).emit('call:accepted', payload);
+      } else {
+        socket.to(`call:${roomId}`).emit('call:accepted', payload);
+      }
 
       console.log(`[WEBRTC] Call accepted for room ${roomId} by ${socket.userId}`);
     } else {
-      // Notify the caller that the call was rejected/busy
-      if (call) {
+      // Notify caller that call was rejected
+      if (call?.callerId) {
         io.to(`user:${call.callerId}`).emit('call:rejected', {
           roomId,
           calleeId: socket.userId,
           reason // 'declined', 'busy', 'timeout'
         });
-        activeCalls.delete(roomId);
       } else {
         socket.to(`call:${roomId}`).emit('call:rejected', { roomId, reason });
+      }
+
+      if (call) {
+        call.calleeName = socket.userName || call.calleeName;
+        call.calleeAvatar = socket.avatar || call.calleeAvatar;
+        const callStatus = reason === 'busy' ? 'busy' : reason === 'timeout' ? 'missed' : 'declined';
+        await recordCallLogMessage(io, {
+          call,
+          callStatus,
+          duration: 0
+        });
+        activeCalls.delete(roomId);
       }
 
       console.log(`[WEBRTC] Call rejected for room ${roomId} by ${socket.userId} (Reason: ${reason})`);
@@ -125,7 +226,6 @@ export function setupCallHandler(io, socket) {
    */
   socket.on('call:media:toggle', ({ roomId, mediaType, enabled }) => {
     if (!roomId) return;
-    // mediaType: 'audio' | 'video' | 'screen'
     socket.to(`call:${roomId}`).emit('call:media:toggle', {
       roomId,
       userId: socket.userId,
@@ -137,22 +237,86 @@ export function setupCallHandler(io, socket) {
   /**
    * 7. HANGUP / END CALL
    */
-  socket.on('call:hangup', ({ roomId, duration = 0 }) => {
+  socket.on('call:hangup', async ({ roomId, duration = 0 }) => {
     if (!roomId) return;
 
     const call = activeCalls.get(roomId);
-    io.to(`call:${roomId}`).emit('call:ended', {
+    const payload = {
       roomId,
       endedBy: socket.userId,
       endedByName: socket.userName,
       duration
-    });
+    };
 
-    // Leave room
+    io.to(`call:${roomId}`).emit('call:ended', payload);
+
+    // If caller cancels before callee joined the room, notify callee personal room to stop ringing
+    if (call) {
+      if (call.callerId) io.to(`user:${call.callerId}`).emit('call:ended', payload);
+      if (call.calleeId) io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+
+      let finalDuration = duration;
+      let callStatus = 'completed';
+
+      if (call.status === 'ringing') {
+        callStatus = 'missed';
+        finalDuration = 0;
+      } else if (call.status === 'connected') {
+        callStatus = 'completed';
+        if (!finalDuration && call.connectedAt) {
+          finalDuration = Math.max(1, Math.round((Date.now() - new Date(call.connectedAt).getTime()) / 1000));
+        }
+      }
+
+      await recordCallLogMessage(io, {
+        call,
+        callStatus,
+        duration: finalDuration
+      });
+
+      activeCalls.delete(roomId);
+    }
+
     socket.leave(`call:${roomId}`);
-    activeCalls.delete(roomId);
 
     console.log(`[WEBRTC] Call ended in room ${roomId} by ${socket.userId} (Duration: ${duration}s)`);
+  });
+
+  /**
+   * 8. Clean up active call on unexpected socket disconnect
+   */
+  socket.on('disconnect', async () => {
+    for (const [roomId, call] of activeCalls.entries()) {
+      if (call.participants.has(socket.id) || call.callerId === socket.userId || call.calleeId === socket.userId) {
+        const payload = {
+          roomId,
+          endedBy: socket.userId,
+          endedByName: socket.userName,
+          reason: 'disconnected'
+        };
+        io.to(`call:${roomId}`).emit('call:ended', payload);
+        if (call.callerId) io.to(`user:${call.callerId}`).emit('call:ended', payload);
+        if (call.calleeId) io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+
+        let finalDuration = 0;
+        let callStatus = 'missed';
+        if (call.status === 'connected') {
+          callStatus = 'completed';
+          if (call.connectedAt) {
+            finalDuration = Math.max(1, Math.round((Date.now() - new Date(call.connectedAt).getTime()) / 1000));
+          }
+        }
+
+        await recordCallLogMessage(io, {
+          call,
+          callStatus,
+          duration: finalDuration
+        });
+
+        activeCalls.delete(roomId);
+        console.log(`[WEBRTC] Call in room ${roomId} ended due to disconnect of ${socket.userId}`);
+      }
+    }
   });
 
   /**
