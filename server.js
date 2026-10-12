@@ -53,6 +53,8 @@ app.use((req, res, next) => {
   const durationMs = () => Date.now() - startedAt;
 
   const persist = () => {
+    if (req.path === '/robots.txt' || req.path === '/favicon.ico') return;
+
     logCronRequest(req, {
       jobName: resolveJobName(req),
       queryParams: redactParams(req.query),
@@ -105,6 +107,11 @@ const io = new Server(httpServer, {
 // ==========================================
 
 const startTime = Date.now();
+
+// Disable web crawlers and robots
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain').send('User-agent: *\nDisallow: /\n');
+});
 
 app.get('/', (req, res) => {
   res.json({
