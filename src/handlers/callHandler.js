@@ -4,6 +4,7 @@
  */
 
 import { saveMessageToDb, addMessageToRoomCache } from './chatHandler.js';
+import { sendCallPushNotification } from '../utils/pushNotification.js';
 
 // Memory map: activeCallRooms (roomId -> { callerId, calleeId, callType, startedAt, participants: Set(socketId) })
 const activeCalls = new Map();
@@ -125,6 +126,16 @@ export function setupCallHandler(io, socket) {
       timestamp: new Date().toISOString()
     });
 
+    // Send high-priority Push Notification to wake device if backgrounded or locked
+    sendCallPushNotification({
+      calleeId: cleanCalleeId,
+      callerName: callerInfo.name || socket.userName || 'Sales Representative',
+      callerAvatar: callerInfo.avatar || socket.avatar,
+      callType,
+      roomId: callRoomId,
+      callerId
+    });
+
     // Notify caller that invite was dispatched
     socket.emit('call:invite:sent', { roomId: callRoomId, calleeId: cleanCalleeId });
 
@@ -165,15 +176,37 @@ export function setupCallHandler(io, socket) {
 
       console.log(`[WEBRTC] Call accepted for room ${roomId} by ${socket.userId}`);
     } else {
-      // Notify caller that call was rejected
+      const rejectPayload = {
+        roomId,
+        calleeId: socket.userId,
+        reason // 'declined', 'busy', 'timeout'
+      };
+      const endPayload = {
+        roomId,
+        endedBy: socket.userId,
+        endedByName: socket.userName,
+        reason,
+        duration: 0
+      };
+
+      // Broadcast rejection & end events to call room and all personal rooms
+      io.to(`call:${roomId}`).emit('call:rejected', rejectPayload);
+      io.to(`call:${roomId}`).emit('call:ended', endPayload);
+      socket.to(`call:${roomId}`).emit('call:rejected', rejectPayload);
+      socket.to(`call:${roomId}`).emit('call:ended', endPayload);
+
       if (call?.callerId) {
-        io.to(`user:${call.callerId}`).to(call.callerId).emit('call:rejected', {
-          roomId,
-          calleeId: socket.userId,
-          reason // 'declined', 'busy', 'timeout'
-        });
-      } else {
-        socket.to(`call:${roomId}`).emit('call:rejected', { roomId, reason });
+        io.to(`user:${call.callerId}`).emit('call:rejected', rejectPayload);
+        io.to(`user:${call.callerId}`).emit('call:ended', endPayload);
+        io.to(call.callerId).emit('call:rejected', rejectPayload);
+        io.to(call.callerId).emit('call:ended', endPayload);
+      }
+
+      if (call?.calleeId) {
+        io.to(`user:${call.calleeId}`).emit('call:rejected', rejectPayload);
+        io.to(`user:${call.calleeId}`).emit('call:ended', endPayload);
+        io.to(call.calleeId).emit('call:rejected', rejectPayload);
+        io.to(call.calleeId).emit('call:ended', endPayload);
       }
 
       if (call) {
@@ -242,25 +275,46 @@ export function setupCallHandler(io, socket) {
   });
 
   /**
-   * 7. HANGUP / END CALL
+   * 7. HANGUP / END CALL (Handles both 'call:hangup' and 'call:end')
    */
-  socket.on('call:hangup', async ({ roomId, duration = 0 }) => {
-    if (!roomId) return;
+  const handleHangup = async ({ roomId, duration = 0, reason = 'ended' } = {}) => {
+    let call = roomId ? activeCalls.get(roomId) : null;
+    let targetRoomId = roomId;
 
-    const call = activeCalls.get(roomId);
+    // Fallback: search for active call by socket.userId or socket.id if roomId is omitted/mismatched
+    if (!call) {
+      for (const [rId, c] of activeCalls.entries()) {
+        if (c.callerId === socket.userId || c.calleeId === socket.userId || c.participants.has(socket.id)) {
+          call = c;
+          targetRoomId = rId;
+          break;
+        }
+      }
+    }
+
     const payload = {
-      roomId,
+      roomId: targetRoomId || null,
       endedBy: socket.userId,
       endedByName: socket.userName,
-      duration
+      duration,
+      reason
     };
 
-    io.to(`call:${roomId}`).emit('call:ended', payload);
+    if (targetRoomId) {
+      io.to(`call:${targetRoomId}`).emit('call:ended', payload);
+      socket.to(`call:${targetRoomId}`).emit('call:ended', payload);
+    }
 
-    // If caller cancels before callee joined the room, notify callee personal room to stop ringing
+    // Notify caller and callee personal rooms
     if (call) {
-      if (call.callerId) io.to(`user:${call.callerId}`).emit('call:ended', payload);
-      if (call.calleeId) io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+      if (call.callerId) {
+        io.to(`user:${call.callerId}`).emit('call:ended', payload);
+        io.to(call.callerId).emit('call:ended', payload);
+      }
+      if (call.calleeId) {
+        io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+        io.to(call.calleeId).emit('call:ended', payload);
+      }
 
       let finalDuration = duration;
       let callStatus = 'completed';
@@ -281,13 +335,16 @@ export function setupCallHandler(io, socket) {
         duration: finalDuration
       });
 
-      activeCalls.delete(roomId);
+      if (targetRoomId) activeCalls.delete(targetRoomId);
     }
 
-    socket.leave(`call:${roomId}`);
+    if (targetRoomId) socket.leave(`call:${targetRoomId}`);
 
-    console.log(`[WEBRTC] Call ended in room ${roomId} by ${socket.userId} (Duration: ${duration}s)`);
-  });
+    console.log(`[WEBRTC] Call ended in room ${targetRoomId || 'unknown'} by ${socket.userId} (Duration: ${duration}s, Reason: ${reason})`);
+  };
+
+  socket.on('call:hangup', handleHangup);
+  socket.on('call:end', handleHangup);
 
   /**
    * 8. Clean up active call on unexpected socket disconnect
@@ -302,8 +359,15 @@ export function setupCallHandler(io, socket) {
           reason: 'disconnected'
         };
         io.to(`call:${roomId}`).emit('call:ended', payload);
-        if (call.callerId) io.to(`user:${call.callerId}`).emit('call:ended', payload);
-        if (call.calleeId) io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+        socket.to(`call:${roomId}`).emit('call:ended', payload);
+        if (call.callerId) {
+          io.to(`user:${call.callerId}`).emit('call:ended', payload);
+          io.to(call.callerId).emit('call:ended', payload);
+        }
+        if (call.calleeId) {
+          io.to(`user:${call.calleeId}`).emit('call:ended', payload);
+          io.to(call.calleeId).emit('call:ended', payload);
+        }
 
         let finalDuration = 0;
         let callStatus = 'missed';

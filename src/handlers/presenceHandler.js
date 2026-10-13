@@ -8,11 +8,13 @@ const workspaceUsers = new Map();
 // Map: socketId -> { userId, workspaceId }
 const socketToUser = new Map();
 
+import { registerUserPushToken } from '../utils/pushNotification.js';
+
 export function setupPresenceHandler(io, socket) {
   /**
    * User registers their presence in a workspace
    */
-  socket.on('user:join', ({ userId, workspaceId, userName, avatar }) => {
+  socket.on('user:join', ({ userId, workspaceId, userName, avatar, expoPushToken, deviceToken }) => {
     if (!userId) {
       console.warn(`[PRESENCE] user:join rejected - missing userId (socket: ${socket.id})`);
       return;
@@ -20,6 +22,10 @@ export function setupPresenceHandler(io, socket) {
 
     const cleanUserId = String(userId);
     const wsId = workspaceId ? String(workspaceId) : 'default';
+
+    if (expoPushToken || deviceToken) {
+      registerUserPushToken(cleanUserId, { expoPushToken, deviceToken });
+    }
 
     socket.userId = cleanUserId;
     socket.workspaceId = wsId;
