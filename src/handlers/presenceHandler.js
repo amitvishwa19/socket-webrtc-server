@@ -13,26 +13,33 @@ export function setupPresenceHandler(io, socket) {
    * User registers their presence in a workspace
    */
   socket.on('user:join', ({ userId, workspaceId, userName, avatar }) => {
-    if (!userId || !workspaceId) return;
+    if (!userId) {
+      console.warn(`[PRESENCE] user:join rejected - missing userId (socket: ${socket.id})`);
+      return;
+    }
 
-    socket.userId = userId;
-    socket.workspaceId = workspaceId;
+    const cleanUserId = String(userId);
+    const wsId = workspaceId ? String(workspaceId) : 'default';
+
+    socket.userId = cleanUserId;
+    socket.workspaceId = wsId;
     socket.userName = userName || 'User';
     socket.avatar = avatar || null;
 
     // Join workspace room and personal user room for targeted notifications
-    socket.join(`workspace:${workspaceId}`);
-    socket.join(`user:${userId}`);
+    socket.join(`workspace:${wsId}`);
+    socket.join(`user:${cleanUserId}`);
+    socket.join(cleanUserId);
 
-    socketToUser.set(socket.id, { userId, workspaceId });
+    socketToUser.set(socket.id, { userId: cleanUserId, workspaceId: wsId });
 
-    if (!workspaceUsers.has(workspaceId)) {
-      workspaceUsers.set(workspaceId, new Map());
+    if (!workspaceUsers.has(wsId)) {
+      workspaceUsers.set(wsId, new Map());
     }
 
-    const usersMap = workspaceUsers.get(workspaceId);
-    usersMap.set(userId, {
-      userId,
+    const usersMap = workspaceUsers.get(wsId);
+    usersMap.set(cleanUserId, {
+      userId: cleanUserId,
       socketId: socket.id,
       name: userName || 'User',
       avatar: avatar || null,
@@ -42,9 +49,9 @@ export function setupPresenceHandler(io, socket) {
 
     // Broadcast updated online users to all members in workspace
     const onlineList = Array.from(usersMap.values());
-    io.to(`workspace:${workspaceId}`).emit('presence:sync', onlineList);
+    io.to(`workspace:${wsId}`).emit('presence:sync', onlineList);
 
-    console.log(`[PRESENCE] User joined: ${userName} (${userId}) in workspace ${workspaceId}`);
+    console.log(`[PRESENCE] User joined: ${userName} (${cleanUserId}) in workspace ${wsId} [socket: ${socket.id}]`);
   });
 
   /**

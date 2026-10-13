@@ -82,10 +82,15 @@ export function setupCallHandler(io, socket) {
    * 1. CALL INVITATION (Caller -> Server -> Callee)
    */
   socket.on('call:invite', ({ calleeId, roomId, callType = 'audio', workspaceId, callerInfo = {} }) => {
-    if (!calleeId) return;
+    if (!calleeId) {
+      console.warn(`[WEBRTC] call:invite dropped - missing calleeId from socket ${socket.id} (${socket.userId})`);
+      return;
+    }
 
-    const callRoomId = roomId || `call_${socket.userId}_${calleeId}_${Date.now()}`;
-    const chatRoomId = [socket.userId, calleeId].sort().join('_');
+    const cleanCalleeId = String(calleeId);
+    const callerId = socket.userId ? String(socket.userId) : (callerInfo?.id ? String(callerInfo.id) : null);
+    const callRoomId = roomId || `call_${callerId || 'anon'}_${cleanCalleeId}_${Date.now()}`;
+    const chatRoomId = callerId ? [callerId, cleanCalleeId].sort().join('_') : `chat_${cleanCalleeId}`;
     const wsId = workspaceId || socket.workspaceId || null;
     socket.join(`call:${callRoomId}`);
 
@@ -93,10 +98,10 @@ export function setupCallHandler(io, socket) {
       roomId: callRoomId,
       chatRoomId,
       workspaceId: wsId,
-      callerId: socket.userId,
+      callerId,
       callerName: callerInfo.name || socket.userName || 'Sales Representative',
       callerAvatar: callerInfo.avatar || socket.avatar || null,
-      calleeId,
+      calleeId: cleanCalleeId,
       calleeName: null,
       calleeAvatar: null,
       callType, // 'audio' | 'video'
@@ -107,10 +112,12 @@ export function setupCallHandler(io, socket) {
       participants: new Set([socket.id])
     });
 
+    console.log(`[WEBRTC] Emitting call:incoming to user:${cleanCalleeId} & ${cleanCalleeId} (caller: ${callerId}, callee: ${cleanCalleeId})`);
+
     // Ring target user personal room
-    io.to(`user:${calleeId}`).emit('call:incoming', {
+    io.to(`user:${cleanCalleeId}`).to(cleanCalleeId).emit('call:incoming', {
       roomId: callRoomId,
-      callerId: socket.userId,
+      callerId,
       callerName: callerInfo.name || socket.userName || 'Sales Representative',
       callerAvatar: callerInfo.avatar || socket.avatar,
       callerTitle: callerInfo.title || 'Team Member',
@@ -119,9 +126,9 @@ export function setupCallHandler(io, socket) {
     });
 
     // Notify caller that invite was dispatched
-    socket.emit('call:invite:sent', { roomId: callRoomId, calleeId });
+    socket.emit('call:invite:sent', { roomId: callRoomId, calleeId: cleanCalleeId });
 
-    console.log(`[WEBRTC] Call invite sent from ${socket.userId} to ${calleeId} (Room: ${callRoomId}, Type: ${callType})`);
+    console.log(`[WEBRTC] Call invite sent from ${callerId} to ${cleanCalleeId} (Room: ${callRoomId}, Type: ${callType})`);
   });
 
   /**
@@ -151,7 +158,7 @@ export function setupCallHandler(io, socket) {
 
       // Notify caller specifically (to avoid duplicate events and SDP Glare on callee)
       if (call?.callerId) {
-        io.to(`user:${call.callerId}`).emit('call:accepted', payload);
+        io.to(`user:${call.callerId}`).to(call.callerId).emit('call:accepted', payload);
       } else {
         socket.to(`call:${roomId}`).emit('call:accepted', payload);
       }
@@ -160,7 +167,7 @@ export function setupCallHandler(io, socket) {
     } else {
       // Notify caller that call was rejected
       if (call?.callerId) {
-        io.to(`user:${call.callerId}`).emit('call:rejected', {
+        io.to(`user:${call.callerId}`).to(call.callerId).emit('call:rejected', {
           roomId,
           calleeId: socket.userId,
           reason // 'declined', 'busy', 'timeout'
