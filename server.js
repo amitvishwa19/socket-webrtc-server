@@ -9,6 +9,7 @@ import { setupPresenceHandler } from './src/handlers/presenceHandler.js';
 import { setupChatHandler } from './src/handlers/chatHandler.js';
 import { setupCallHandler } from './src/handlers/callHandler.js';
 import { createCronRouter } from './src/routes/cronRoutes.js';
+import { createInternalRouter } from './src/routes/internalRoutes.js';
 import { logCronRequest } from './src/lib/cronLogger.js';
 
 dotenv.config();
@@ -141,10 +142,13 @@ app.get('/metrics', (req, res) => {
 });
 
 // ==========================================
-// ⏰ KEEPALIVE CRON ROUTER
+// ⏰ KEEPALIVE CRON ROUTER & INTERNAL EVENT BROADCAST
 // ==========================================
 const cronRouter = createCronRouter(io);
 app.use('/cron', cronRouter);
+
+const internalRouter = createInternalRouter(io);
+app.use('/api/internal', internalRouter);
 
 // ==========================================
 // 🔌 SOCKET.IO CONNECTION ROUTER
