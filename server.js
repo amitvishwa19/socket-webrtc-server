@@ -157,6 +157,11 @@ app.use('/api/internal', internalRouter);
 io.on('connection', (socket) => {
   console.log(`[SOCKET_CONNECT] New client connected: ${socket.id}`);
 
+  // Immediate ping responder for client latency calculation
+  socket.on('client:ping', (cb) => {
+    if (typeof cb === 'function') cb(Date.now());
+  });
+
   // Attach module event handlers
   setupPresenceHandler(io, socket);
   setupChatHandler(io, socket);
