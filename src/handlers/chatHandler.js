@@ -4,6 +4,7 @@
  */
 
 import { prisma } from '../lib/prisma.js';
+import { canUserAccessRoom } from '../lib/auth.js';
 
 // In-Memory cache for low-latency retrieval: roomId -> Array<Message>
 const roomCache = new Map();
@@ -106,23 +107,31 @@ export function setupChatHandler(io, socket) {
         workspaceId,
         message,
         attachments = [],
-        senderId,
-        senderName,
-        senderAvatar,
         clientMessageId
       } = payload || {};
 
       if (!message?.trim() && (!attachments || attachments.length === 0)) return;
 
-      const effectiveSenderId = senderId || socket.userId || 'anonymous';
-      const effectiveSenderName = senderName || socket.userName || 'User';
-      const effectiveSenderAvatar = senderAvatar || socket.avatar || null;
+      // 🔒 Security: Force cryptographically verified sender identity
+      const effectiveSenderId = socket.userId || 'anonymous';
+      const effectiveSenderName = socket.userName || 'User';
+      const effectiveSenderAvatar = socket.avatar || null;
+      const targetRoomId = roomId || 'general';
+      const targetWorkspaceId = workspaceId || socket.workspaceId || null;
+
+      // 🔒 Security: Verify room access authorization
+      const allowed = await canUserAccessRoom(socket, targetRoomId, targetWorkspaceId);
+      if (!allowed) {
+        console.warn(`[CHAT] Rejected message from ${socket.userId} to unauthorized room ${targetRoomId}`);
+        socket.emit('error:unauthorized', { message: 'Unauthorized room access' });
+        return;
+      }
 
       const messagePayload = {
         id: clientMessageId || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         clientMessageId,
-        roomId: roomId || 'general',
-        workspaceId: workspaceId || socket.workspaceId || null,
+        roomId: targetRoomId,
+        workspaceId: targetWorkspaceId,
         senderId: effectiveSenderId,
         senderName: effectiveSenderName,
         senderAvatar: effectiveSenderAvatar,
@@ -155,8 +164,8 @@ export function setupChatHandler(io, socket) {
       });
 
       // 4. Broadcast to active room members (excluding the sender)
-      if (roomId) {
-        socket.to(`room:${roomId}`).emit('chat:message:receive', messagePayload);
+      if (targetRoomId) {
+        socket.to(`room:${targetRoomId}`).emit('chat:message:receive', messagePayload);
       }
 
       // 5. If recipientId is specified and recipient is NOT self
@@ -164,7 +173,7 @@ export function setupChatHandler(io, socket) {
         // Check if recipient is already in this room
         let recipientInRoom = false;
         try {
-          const roomSockets = await io.in(`room:${roomId}`).fetchSockets();
+          const roomSockets = await io.in(`room:${targetRoomId}`).fetchSockets();
           recipientInRoom = roomSockets.some((s) => s.userId === recipientId);
         } catch {
           recipientInRoom = false;
@@ -178,12 +187,12 @@ export function setupChatHandler(io, socket) {
             title: `Message from ${effectiveSenderName}`,
             body: message ? message.slice(0, 80) : 'Sent an attachment',
             senderId: effectiveSenderId,
-            roomId
+            roomId: targetRoomId
           });
         }
       }
 
-      console.log(`[CHAT] Message sent in room ${roomId} by ${effectiveSenderId}`);
+      console.log(`[CHAT] Message sent in room ${targetRoomId} by ${effectiveSenderId}`);
     } catch (err) {
       console.error('[CHAT_SEND_ERROR]', err);
     }
@@ -192,8 +201,17 @@ export function setupChatHandler(io, socket) {
   /**
    * 2. Join a chat room and retrieve recent history
    */
-  socket.on('chat:room:join', async ({ roomId }) => {
+  socket.on('chat:room:join', async ({ roomId, workspaceId }) => {
     if (!roomId) return;
+
+    // 🔒 Security: Check room authorization
+    const allowed = await canUserAccessRoom(socket, roomId, workspaceId);
+    if (!allowed) {
+      console.warn(`[CHAT] Unauthorized room join rejected: socket ${socket.id} (${socket.userId}) -> room ${roomId}`);
+      socket.emit('error:unauthorized', { message: 'Unauthorized room access' });
+      return;
+    }
+
     socket.join(`room:${roomId}`);
     console.log(`[CHAT] Socket ${socket.id} (${socket.userId || 'guest'}) joined room ${roomId}`);
 
@@ -208,8 +226,17 @@ export function setupChatHandler(io, socket) {
   /**
    * 3. Explicit request for room history
    */
-  socket.on('chat:history:get', async ({ roomId }) => {
+  socket.on('chat:history:get', async ({ roomId, workspaceId }) => {
     if (!roomId) return;
+
+    // 🔒 Security: Check room authorization
+    const allowed = await canUserAccessRoom(socket, roomId, workspaceId);
+    if (!allowed) {
+      console.warn(`[CHAT] Unauthorized room history rejected: socket ${socket.id} (${socket.userId}) -> room ${roomId}`);
+      socket.emit('error:unauthorized', { message: 'Unauthorized room access' });
+      return;
+    }
+
     try {
       const history = await getRoomHistory(roomId);
       socket.emit('chat:room:history', { roomId, messages: history });

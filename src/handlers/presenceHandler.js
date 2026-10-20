@@ -9,31 +9,43 @@ const workspaceUsers = new Map();
 const socketToUser = new Map();
 
 import { registerUserPushToken } from '../utils/pushNotification.js';
+import { canUserAccessWorkspace } from '../lib/auth.js';
 
 export function setupPresenceHandler(io, socket) {
   /**
    * User registers their presence in a workspace
    */
-  socket.on('user:join', ({ userId, workspaceId, userName, avatar, expoPushToken, deviceToken }) => {
-    if (!userId) {
-      console.warn(`[PRESENCE] user:join rejected - missing userId (socket: ${socket.id})`);
+  socket.on('user:join', async ({ workspaceId, expoPushToken, deviceToken }) => {
+    // 🔒 Security: Use cryptographically verified identity from socket handshake
+    const cleanUserId = socket.userId;
+    if (!cleanUserId) {
+      console.warn(`[PRESENCE] user:join rejected - unauthenticated socket ${socket.id}`);
+      socket.emit('error:unauthorized', { message: 'Authentication required' });
       return;
     }
 
-    const cleanUserId = String(userId);
     const wsId = workspaceId ? String(workspaceId) : 'default';
+
+    // 🔒 Security: Validate workspace membership
+    if (wsId !== 'default') {
+      const hasAccess = await canUserAccessWorkspace(socket, wsId);
+      if (!hasAccess) {
+        console.warn(`[PRESENCE] user:join rejected - user ${cleanUserId} lacks access to workspace ${wsId}`);
+        socket.emit('error:unauthorized', { message: 'Unauthorized workspace access' });
+        return;
+      }
+    }
 
     if (expoPushToken || deviceToken) {
       registerUserPushToken(cleanUserId, { expoPushToken, deviceToken });
     }
 
-    socket.userId = cleanUserId;
     socket.workspaceId = wsId;
-    socket.userName = userName || 'User';
-    socket.avatar = avatar || null;
 
     // Join workspace room and personal user room for targeted notifications
-    socket.join(`workspace:${wsId}`);
+    if (wsId !== 'default') {
+      socket.join(`workspace:${wsId}`);
+    }
     socket.join(`user:${cleanUserId}`);
     socket.join(cleanUserId);
 
@@ -47,8 +59,8 @@ export function setupPresenceHandler(io, socket) {
     usersMap.set(cleanUserId, {
       userId: cleanUserId,
       socketId: socket.id,
-      name: userName || 'User',
-      avatar: avatar || null,
+      name: socket.userName || 'User',
+      avatar: socket.avatar || null,
       status: 'online',
       joinedAt: new Date().toISOString()
     });
@@ -57,7 +69,7 @@ export function setupPresenceHandler(io, socket) {
     const onlineList = Array.from(usersMap.values());
     io.to(`workspace:${wsId}`).emit('presence:sync', onlineList);
 
-    console.log(`[PRESENCE] User joined: ${userName} (${cleanUserId}) in workspace ${wsId} [socket: ${socket.id}]`);
+    console.log(`[PRESENCE] User joined: ${socket.userName} (${cleanUserId}) in workspace ${wsId} [socket: ${socket.id}]`);
   });
 
   /**

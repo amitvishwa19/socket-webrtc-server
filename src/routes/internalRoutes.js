@@ -1,12 +1,20 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 
 export function createInternalRouter(io) {
   const router = Router();
-  const secret = process.env.INTERNAL_SERVICE_SECRET || 'devlomatix_internal_secret_key_2026';
+  const configuredSecret = process.env.INTERNAL_SERVICE_SECRET || 'devlomatix_internal_secret_key_2026';
 
   router.post('/emit', (req, res) => {
     const authHeader = req.headers['x-internal-secret'];
-    if (authHeader !== secret) {
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Unauthorized: missing internal secret' });
+    }
+
+    const headerBuf = Buffer.from(String(authHeader));
+    const secretBuf = Buffer.from(String(configuredSecret));
+
+    if (headerBuf.length !== secretBuf.length || !crypto.timingSafeEqual(headerBuf, secretBuf)) {
       return res.status(401).json({ error: 'Unauthorized: invalid internal secret' });
     }
 

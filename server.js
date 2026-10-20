@@ -11,6 +11,7 @@ import { setupCallHandler } from './src/handlers/callHandler.js';
 import { createCronRouter } from './src/routes/cronRoutes.js';
 import { createInternalRouter } from './src/routes/internalRoutes.js';
 import { logCronRequest } from './src/lib/cronLogger.js';
+import { verifySocketToken } from './src/lib/auth.js';
 
 dotenv.config();
 
@@ -151,11 +152,43 @@ const internalRouter = createInternalRouter(io);
 app.use('/api/internal', internalRouter);
 
 // ==========================================
+// 🔐 SOCKET.IO AUTHENTICATION MIDDLEWARE
+// ==========================================
+
+io.use(async (socket, next) => {
+  try {
+    const token =
+      socket.handshake.auth?.token ||
+      socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '') ||
+      socket.handshake.query?.token;
+
+    if (!token) {
+      console.warn(`[AUTH_REJECT] Socket ${socket.id} rejected: Missing auth token.`);
+      return next(new Error('Authentication error: Missing token'));
+    }
+
+    const authData = await verifySocketToken(token);
+    socket.user = authData.user;
+    socket.userId = String(authData.user.id);
+    socket.userName = authData.user.displayName || 'User';
+    socket.avatar = authData.user.avatar || null;
+    socket.authorizedWorkspaces = new Set(authData.workspaces.map(String));
+    socket.isInternal = !!authData.isInternal;
+
+    console.log(`[AUTH_SUCCESS] Socket ${socket.id} authenticated as '${socket.userName}' (${socket.userId})`);
+    next();
+  } catch (err) {
+    console.warn(`[AUTH_REJECT] Socket ${socket.id} rejected: ${err.message}`);
+    return next(new Error(`Authentication error: ${err.message}`));
+  }
+});
+
+// ==========================================
 // 🔌 SOCKET.IO CONNECTION ROUTER
 // ==========================================
 
 io.on('connection', (socket) => {
-  console.log(`[SOCKET_CONNECT] New client connected: ${socket.id}`);
+  console.log(`[SOCKET_CONNECT] Authenticated client connected: ${socket.id} (User: ${socket.userId})`);
 
   // Immediate ping responder for client latency calculation
   socket.on('client:ping', (cb) => {

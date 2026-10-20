@@ -89,9 +89,20 @@ export function setupCallHandler(io, socket) {
     }
 
     const cleanCalleeId = String(calleeId);
-    const callerId = socket.userId ? String(socket.userId) : (callerInfo?.id ? String(callerInfo.id) : null);
-    const callRoomId = roomId || `call_${callerId || 'anon'}_${cleanCalleeId}_${Date.now()}`;
-    const chatRoomId = callerId ? [callerId, cleanCalleeId].sort().join('_') : `chat_${cleanCalleeId}`;
+
+    // 🔒 Security: Caller cannot call themselves
+    if (cleanCalleeId === socket.userId) {
+      console.warn(`[WEBRTC] call:invite dropped - self calling not permitted (${socket.userId})`);
+      return;
+    }
+
+    // 🔒 Security: Force verified caller identity from socket token
+    const callerId = socket.userId;
+    const callerName = socket.userName || callerInfo.name || 'Sales Representative';
+    const callerAvatar = socket.avatar || callerInfo.avatar || null;
+
+    const callRoomId = roomId || `call_${callerId}_${cleanCalleeId}_${Date.now()}`;
+    const chatRoomId = [callerId, cleanCalleeId].sort().join('_');
     const wsId = workspaceId || socket.workspaceId || null;
     socket.join(`call:${callRoomId}`);
 
@@ -100,8 +111,8 @@ export function setupCallHandler(io, socket) {
       chatRoomId,
       workspaceId: wsId,
       callerId,
-      callerName: callerInfo.name || socket.userName || 'Sales Representative',
-      callerAvatar: callerInfo.avatar || socket.avatar || null,
+      callerName,
+      callerAvatar,
       calleeId: cleanCalleeId,
       calleeName: null,
       calleeAvatar: null,
@@ -113,15 +124,15 @@ export function setupCallHandler(io, socket) {
       participants: new Set([socket.id])
     });
 
-    console.log(`[WEBRTC] Emitting call:incoming to user:${cleanCalleeId} & ${cleanCalleeId} (caller: ${callerId}, callee: ${cleanCalleeId})`);
+    console.log(`[WEBRTC] Emitting call:incoming to user:${cleanCalleeId} (caller: ${callerId}, callee: ${cleanCalleeId})`);
 
     // Ring target user personal room
     io.to(`user:${cleanCalleeId}`).to(cleanCalleeId).emit('call:incoming', {
       roomId: callRoomId,
       callerId,
-      callerName: callerInfo.name || socket.userName || 'Sales Representative',
-      callerAvatar: callerInfo.avatar || socket.avatar,
-      callerTitle: callerInfo.title || 'Team Member',
+      callerName,
+      callerAvatar,
+      callerTitle: callerInfo?.title || 'Team Member',
       callType,
       timestamp: new Date().toISOString()
     });
@@ -129,8 +140,8 @@ export function setupCallHandler(io, socket) {
     // Send high-priority Push Notification to wake device if backgrounded or locked
     sendCallPushNotification({
       calleeId: cleanCalleeId,
-      callerName: callerInfo.name || socket.userName || 'Sales Representative',
-      callerAvatar: callerInfo.avatar || socket.avatar,
+      callerName,
+      callerAvatar,
       callType,
       roomId: callRoomId,
       callerId
@@ -149,6 +160,12 @@ export function setupCallHandler(io, socket) {
     if (!roomId) return;
 
     const call = activeCalls.get(roomId);
+
+    // 🔒 Security: Only the intended callee can accept/reject the call
+    if (call && call.calleeId !== socket.userId) {
+      console.warn(`[WEBRTC] Unauthorized call response: socket ${socket.userId} is not callee ${call.calleeId}`);
+      return;
+    }
 
     if (accepted) {
       socket.join(`call:${roomId}`);
@@ -230,6 +247,10 @@ export function setupCallHandler(io, socket) {
    */
   socket.on('call:sdp:offer', ({ roomId, sdp }) => {
     if (!roomId || !sdp) return;
+    const call = activeCalls.get(roomId);
+    if (call && call.callerId !== socket.userId && call.calleeId !== socket.userId && !call.participants.has(socket.id)) {
+      return;
+    }
     socket.to(`call:${roomId}`).emit('call:sdp:offer', {
       roomId,
       sdp,
@@ -242,6 +263,10 @@ export function setupCallHandler(io, socket) {
    */
   socket.on('call:sdp:answer', ({ roomId, sdp }) => {
     if (!roomId || !sdp) return;
+    const call = activeCalls.get(roomId);
+    if (call && call.callerId !== socket.userId && call.calleeId !== socket.userId && !call.participants.has(socket.id)) {
+      return;
+    }
     socket.to(`call:${roomId}`).emit('call:sdp:answer', {
       roomId,
       sdp,
@@ -254,6 +279,10 @@ export function setupCallHandler(io, socket) {
    */
   socket.on('call:ice:candidate', ({ roomId, candidate }) => {
     if (!roomId || !candidate) return;
+    const call = activeCalls.get(roomId);
+    if (call && call.callerId !== socket.userId && call.calleeId !== socket.userId && !call.participants.has(socket.id)) {
+      return;
+    }
     socket.to(`call:${roomId}`).emit('call:ice:candidate', {
       roomId,
       candidate,
@@ -266,6 +295,10 @@ export function setupCallHandler(io, socket) {
    */
   socket.on('call:media:toggle', ({ roomId, mediaType, enabled }) => {
     if (!roomId) return;
+    const call = activeCalls.get(roomId);
+    if (call && call.callerId !== socket.userId && call.calleeId !== socket.userId && !call.participants.has(socket.id)) {
+      return;
+    }
     socket.to(`call:${roomId}`).emit('call:media:toggle', {
       roomId,
       userId: socket.userId,
