@@ -162,3 +162,102 @@ export async function sendCallPushNotification({ calleeId, callerName, callerAva
     console.log(`[PUSH] No device token or Expo push token found for user ${cleanCalleeId}. Push skipped.`);
   }
 }
+
+/**
+ * Send incoming email push notification (Direct FCM to Android device + Expo Push fallback)
+ */
+export async function sendEmailPushNotification({ userId, senderName, subject, snippet, threadId, workspaceId }) {
+  if (!userId) return;
+  const cleanUserId = String(userId);
+
+  let cached = userTokensCache.get(cleanUserId);
+
+  if (!cached?.deviceToken && !cached?.expoPushToken) {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: cleanUserId },
+        select: { deviceToken: true, expoPushToken: true, displayName: true }
+      });
+      if (user) {
+        cached = {
+          deviceToken: user.deviceToken || null,
+          expoPushToken: user.expoPushToken || null
+        };
+        userTokensCache.set(cleanUserId, cached);
+      }
+    } catch (err) {
+      console.warn('[PUSH_DB_WARN] Could not retrieve tokens for email push user:', cleanUserId, err?.message);
+    }
+  }
+
+  const emailTitle = `✉️ ${senderName || 'New Email'}`;
+  const emailBody = `${subject ? subject + ': ' : ''}${snippet || 'You received a new email'}`;
+
+  // 1. Send Direct FCM Push
+  if (firebaseApp && cached?.deviceToken) {
+    try {
+      const messaging = getMessaging(firebaseApp);
+      await messaging.send({
+        token: cached.deviceToken,
+        notification: {
+          title: emailTitle,
+          body: emailBody
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'emails',
+            sound: 'default',
+            priority: 'high',
+            visibility: 'public',
+            defaultVibrateTimings: true
+          }
+        },
+        data: {
+          type: 'new_email',
+          threadId: String(threadId || ''),
+          workspaceId: String(workspaceId || ''),
+          senderName: String(senderName || ''),
+          subject: String(subject || ''),
+          timestamp: new Date().toISOString()
+        }
+      });
+      console.log(`[PUSH_FCM] Delivered email push to user ${cleanUserId}`);
+    } catch (fcmErr) {
+      console.warn('[PUSH_FCM_EMAIL_WARN]', fcmErr?.message || fcmErr);
+    }
+  }
+
+  // 2. Send Expo Push Fallback
+  if (cached?.expoPushToken) {
+    try {
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-encoding': 'gzip, deflate',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: cached.expoPushToken,
+          sound: 'default',
+          priority: 'high',
+          channelId: 'emails',
+          title: emailTitle,
+          body: emailBody,
+          data: {
+            type: 'new_email',
+            threadId: String(threadId || ''),
+            workspaceId: String(workspaceId || ''),
+            senderName: String(senderName || ''),
+            subject: String(subject || '')
+          }
+        })
+      });
+      console.log(`[PUSH_EXPO] Delivered email push to user ${cleanUserId}`);
+    } catch (expoErr) {
+      console.warn('[PUSH_EXPO_EMAIL_WARN]', expoErr?.message || expoErr);
+    }
+  }
+}
+
