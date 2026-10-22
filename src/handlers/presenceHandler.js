@@ -42,6 +42,21 @@ export function setupPresenceHandler(io, socket) {
 
     socket.workspaceId = wsId;
 
+    // Clean up previous workspace registration if rejoining different workspace
+    const prevMeta = socketToUser.get(socket.id);
+    if (prevMeta && prevMeta.workspaceId !== wsId) {
+      const prevWsId = prevMeta.workspaceId;
+      console.log(`[PRESENCE] User ${cleanUserId} migrating from workspace ${prevWsId} to ${wsId}`);
+      if (workspaceUsers.has(prevWsId)) {
+        const prevMap = workspaceUsers.get(prevWsId);
+        prevMap.delete(cleanUserId);
+        const prevOnlineList = Array.from(prevMap.values());
+        io.to(`workspace:${prevWsId}`).emit('presence:sync', prevOnlineList);
+        if (prevMap.size === 0) workspaceUsers.delete(prevWsId);
+      }
+      socket.leave(`workspace:${prevWsId}`);
+    }
+
     // Join workspace room and personal user room for targeted notifications
     if (wsId !== 'default') {
       socket.join(`workspace:${wsId}`);
