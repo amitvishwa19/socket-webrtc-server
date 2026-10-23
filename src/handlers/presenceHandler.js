@@ -1,22 +1,37 @@
 /**
- * Presence Handler: Manages online users, status (online/busy/away), and workspace rooms
+ * Presence Handler: Global userId-based online presence
+ * No workspace scoping — all authenticated users share a global presence list.
+ * Clients filter by their own team members locally.
  */
 
-// Memory store: workspaceId -> Map(userId -> { socketId, userId, name, avatar, status, lastSeen })
-const workspaceUsers = new Map();
-
-// Map: socketId -> { userId, workspaceId }
-const socketToUser = new Map();
-
 import { registerUserPushToken } from '../utils/pushNotification.js';
-import { canUserAccessWorkspace } from '../lib/auth.js';
+
+// Global online users map: userId -> { userId, socketId, name, avatar, status, joinedAt }
+const onlineUsersMap = new Map();
+
+// socketId -> userId (for cleanup on disconnect)
+const socketToUserId = new Map();
+
+const PRESENCE_ROOM = 'global:presence';
+
+/**
+ * Broadcast the current online user list to all presence subscribers
+ */
+function broadcastPresence(io) {
+  const onlineList = Array.from(onlineUsersMap.values());
+  io.to(PRESENCE_ROOM).emit('presence:sync', onlineList);
+}
 
 export function setupPresenceHandler(io, socket) {
+  // Every authenticated socket immediately joins the global presence room
+  socket.join(PRESENCE_ROOM);
+
   /**
-   * User registers their presence in a workspace
+   * User registers their presence (called after socket connects)
+   * workspaceId is optional and only used for workspace-specific room joins (calls, chat)
    */
-  socket.on('user:join', async ({ workspaceId, expoPushToken, deviceToken }) => {
-    // 🔒 Security: Use cryptographically verified identity from socket handshake
+  socket.on('user:join', async ({ workspaceId, expoPushToken, deviceToken } = {}) => {
+    // Identity comes from verified JWT on the socket handshake — not the payload
     const cleanUserId = socket.userId;
     if (!cleanUserId) {
       console.warn(`[PRESENCE] user:join rejected - unauthenticated socket ${socket.id}`);
@@ -24,54 +39,26 @@ export function setupPresenceHandler(io, socket) {
       return;
     }
 
-    const wsId = workspaceId ? String(workspaceId) : 'default';
-
-    // 🔒 Security: Validate workspace membership
-    if (wsId !== 'default') {
-      const hasAccess = await canUserAccessWorkspace(socket, wsId);
-      if (!hasAccess) {
-        console.warn(`[PRESENCE] user:join rejected - user ${cleanUserId} lacks access to workspace ${wsId}`);
-        socket.emit('error:unauthorized', { message: 'Unauthorized workspace access' });
-        return;
-      }
-    }
-
+    // Register push tokens if provided
     if (expoPushToken || deviceToken) {
       registerUserPushToken(cleanUserId, { expoPushToken, deviceToken });
     }
 
-    socket.workspaceId = wsId;
-
-    // Clean up previous workspace registration if rejoining different workspace
-    const prevMeta = socketToUser.get(socket.id);
-    if (prevMeta && prevMeta.workspaceId !== wsId) {
-      const prevWsId = prevMeta.workspaceId;
-      console.log(`[PRESENCE] User ${cleanUserId} migrating from workspace ${prevWsId} to ${wsId}`);
-      if (workspaceUsers.has(prevWsId)) {
-        const prevMap = workspaceUsers.get(prevWsId);
-        prevMap.delete(cleanUserId);
-        const prevOnlineList = Array.from(prevMap.values());
-        io.to(`workspace:${prevWsId}`).emit('presence:sync', prevOnlineList);
-        if (prevMap.size === 0) workspaceUsers.delete(prevWsId);
-      }
-      socket.leave(`workspace:${prevWsId}`);
-    }
-
-    // Join workspace room and personal user room for targeted notifications
-    if (wsId !== 'default') {
-      socket.join(`workspace:${wsId}`);
-    }
+    // Join personal user rooms for targeted notifications & calls
     socket.join(`user:${cleanUserId}`);
     socket.join(cleanUserId);
 
-    socketToUser.set(socket.id, { userId: cleanUserId, workspaceId: wsId });
-
-    if (!workspaceUsers.has(wsId)) {
-      workspaceUsers.set(wsId, new Map());
+    // Join workspace room if provided (used for calls, chat — not for presence)
+    if (workspaceId && workspaceId !== 'default') {
+      socket.workspaceId = String(workspaceId);
+      socket.join(`workspace:${String(workspaceId)}`);
     }
 
-    const usersMap = workspaceUsers.get(wsId);
-    usersMap.set(cleanUserId, {
+    // Track this socket -> userId mapping
+    socketToUserId.set(socket.id, cleanUserId);
+
+    // Register / refresh user in global online map
+    onlineUsersMap.set(cleanUserId, {
       userId: cleanUserId,
       socketId: socket.id,
       name: socket.userName || 'User',
@@ -80,68 +67,64 @@ export function setupPresenceHandler(io, socket) {
       joinedAt: new Date().toISOString()
     });
 
-    // Broadcast updated online users to all members in workspace
-    const onlineList = Array.from(usersMap.values());
-    io.to(`workspace:${wsId}`).emit('presence:sync', onlineList);
+    // Broadcast updated list to everyone
+    broadcastPresence(io);
 
-    console.log(`[PRESENCE] User joined: ${socket.userName} (${cleanUserId}) in workspace ${wsId} [socket: ${socket.id}]`);
+    console.log(`[PRESENCE] User online: ${socket.userName} (${cleanUserId}) [socket: ${socket.id}]`);
   });
 
   /**
    * User updates their status (e.g. 'online', 'busy', 'in-call', 'away')
    */
   socket.on('presence:status:update', ({ status }) => {
-    const { userId, workspaceId } = socketToUser.get(socket.id) || {};
-    if (!userId || !workspaceId) return;
+    const userId = socketToUserId.get(socket.id);
+    if (!userId || !onlineUsersMap.has(userId)) return;
 
-    const usersMap = workspaceUsers.get(workspaceId);
-    if (usersMap && usersMap.has(userId)) {
-      const user = usersMap.get(userId);
-      user.status = status || 'online';
-      usersMap.set(userId, user);
+    const user = onlineUsersMap.get(userId);
+    user.status = status || 'online';
+    onlineUsersMap.set(userId, user);
 
-      io.to(`workspace:${workspaceId}`).emit('presence:user:status', {
-        userId,
-        status: user.status
-      });
-    }
+    broadcastPresence(io);
   });
 
   /**
-   * Handle user disconnect
+   * Handle user disconnect — remove from online map and notify all
    */
   socket.on('disconnect', () => {
-    const userMeta = socketToUser.get(socket.id);
-    if (!userMeta) return;
+    const userId = socketToUserId.get(socket.id);
+    if (!userId) return;
 
-    const { userId, workspaceId } = userMeta;
-    socketToUser.delete(socket.id);
+    socketToUserId.delete(socket.id);
 
-    if (workspaceUsers.has(workspaceId)) {
-      const usersMap = workspaceUsers.get(workspaceId);
-      usersMap.delete(userId);
-
-      const onlineList = Array.from(usersMap.values());
-      io.to(`workspace:${workspaceId}`).emit('presence:sync', onlineList);
-      io.to(`workspace:${workspaceId}`).emit('presence:user:left', { userId });
-
-      if (usersMap.size === 0) {
-        workspaceUsers.delete(workspaceId);
-      }
+    // Only remove if this socket was the active one for that userId
+    // (handles reconnects where a new socket takes over)
+    const existing = onlineUsersMap.get(userId);
+    if (existing && existing.socketId === socket.id) {
+      onlineUsersMap.delete(userId);
+      broadcastPresence(io);
+      console.log(`[PRESENCE] User offline: ${userId}`);
     }
-
-    console.log(`[PRESENCE] User disconnected: ${userId} from workspace ${workspaceId}`);
   });
 }
 
+/**
+ * Get the socketId for a given userId (used by call handler)
+ */
 export function getUserSocket(userId) {
-  for (const [socketId, meta] of socketToUser.entries()) {
-    if (meta.userId === userId) return socketId;
-  }
-  return null;
+  const entry = onlineUsersMap.get(String(userId));
+  return entry?.socketId || null;
 }
 
-export function getWorkspaceOnlineUsers(workspaceId) {
-  if (!workspaceUsers.has(workspaceId)) return [];
-  return Array.from(workspaceUsers.get(workspaceId).values());
+/**
+ * Get all currently online users
+ */
+export function getOnlineUsers() {
+  return Array.from(onlineUsersMap.values());
+}
+
+/**
+ * Legacy export — returns all online users regardless of workspace
+ */
+export function getWorkspaceOnlineUsers(_workspaceId) {
+  return getOnlineUsers();
 }
