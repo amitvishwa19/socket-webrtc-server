@@ -27,7 +27,8 @@ export function createInternalRouter(io) {
     // 1. Direct Targeted User dispatch (1-to-1 alert)
     if (targetUserId) {
       io.to(`user:${targetUserId}`).emit(event, data);
-      console.log(`[INTERNAL_EMIT] Targeted event '${event}' dispatched to 'user:${targetUserId}'`);
+      io.to(String(targetUserId)).emit(event, data);
+      console.log(`[INTERNAL_EMIT] Targeted event '${event}' dispatched to user '${targetUserId}'`);
     }
     // 2. Specific Resource Room (e.g. thread:xxx, deal:xxx)
     else if (targetRoom) {
